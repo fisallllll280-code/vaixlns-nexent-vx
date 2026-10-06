@@ -11,7 +11,7 @@ def test_capability_gate_authorizes_valid_capability():
         name="safe_patch",
         intent="repair known failure",
         allowed_actions=["analyze", "repair"],
-        forbidden_actions=["override_policy"],
+        forbidden_actions=[],
         authority_required="governance",
         resource_contract=ResourceContract(
             max_cpu_ms=100,
