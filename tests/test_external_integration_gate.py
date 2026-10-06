@@ -7,6 +7,7 @@ def base(**changes):
         kind=IntegrationKind.MODEL,
         endpoint="provider://model",
         capability="inference",
+        allowed_capabilities=("inference",),
         contract_version="v1",
         dependency_fingerprint="dep:v1",
         environment_fingerprint="env:v1",
@@ -35,3 +36,7 @@ def test_dependency_drift_blocks():
 
 def test_identity_drift_blocks():
     assert ExternalIntegrationRuntimeGate().authorize(base(proof_integration_identity="model:changed")) is False
+
+
+def test_capability_escalation_blocks():
+    assert ExternalIntegrationRuntimeGate().authorize(base(capability="filesystem_write")) is False
