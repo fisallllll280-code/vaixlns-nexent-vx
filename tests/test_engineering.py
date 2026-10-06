@@ -18,7 +18,7 @@ def test_wilson_bound_is_conservative():
     assert wilson_lower_bound(0,10) == 0.0
 
 def test_risk_and_blast_radius_are_bounded():
-    assert expected_risk([0.5,0.2],[0.4,0.5]) == 0.3
+    assert abs(expected_risk([0.5,0.2],[0.4,0.5]) - 0.3) < 1e-12
     assert 0.0 <= blast_radius([0.2,0.3]) <= 1.0
 
 def test_capability_similarity():
