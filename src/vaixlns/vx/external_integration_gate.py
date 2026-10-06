@@ -21,6 +21,7 @@ class RuntimeIntegration:
     kind: IntegrationKind
     endpoint: str
     capability: str
+    allowed_capabilities: tuple[str, ...]
     contract_version: str
     dependency_fingerprint: str
     environment_fingerprint: str
@@ -33,10 +34,14 @@ class RuntimeIntegration:
 
 
 class ExternalIntegrationRuntimeGate:
+    """Only a fresh, identity-bound, explicitly authorized capability may execute."""
+
     def authorize(self, integration: RuntimeIntegration) -> bool:
         if not integration.explicit_authority:
             return False
-        if integration.integration_id == "":
+        if not integration.integration_id:
+            return False
+        if integration.capability not in integration.allowed_capabilities:
             return False
         if integration.proof_integration_identity != integration.integration_id:
             return False
