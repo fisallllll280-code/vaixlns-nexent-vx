@@ -7,3 +7,5 @@ Recovery record:
 - restored canonical source: `src/vaixlns/core/proof_classifier.py`
 - source semantics preserved in the corrected file
 - malformed identity retained here for zero-loss lineage
+
+- post-recovery tree audit: no path exceeded 180 characters at repaired head.
