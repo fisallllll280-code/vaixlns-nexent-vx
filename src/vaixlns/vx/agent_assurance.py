@@ -458,7 +458,7 @@ class AssuranceSession:
                 raise EvidenceError("partial_effect_precondition_version_mismatch")
             if not set(p.get("diff_paths", [])).issubset(set(self.contract.allowed_diff_paths)):
                 raise EvidenceError("partial_effect_outside_allowlist")
-            if not p.get("state_hash") or not isinstance(p.get("sequence"), int):
+            if not p.get("state_hash") or not isinstance(p.get("sequence"), int) or not p.get("resource_version_after"):
                 raise EvidenceError("partial_effect_audit_incomplete")
         except EvidenceError as exc:
             self._record("PARTIAL_EFFECT_EVIDENCE_REJECTED", "RECOVERY_REQUIRED", now, False, str(exc), [audit.receipt_digest])
@@ -549,6 +549,11 @@ class AssuranceSession:
         self._permit = permit
         self._record("COMPENSATION_STARTED", "COMPENSATING", now, True, evidence_refs=[digest(permit.unsigned_payload())])
         return True
+
+    def abort(self, now: int) -> None:
+        if self._state not in {"SPECIFIED", "AUTHORIZED", "VERIFIED_PLAN"}:
+            raise InvalidTransition("abort is allowed only before execution starts")
+        self._record("ABORT_REQUESTED", "ABORTED", now, True)
 
     def close_verified(self, now: int) -> bool:
         if self._state != "EFFECT_VERIFIED" or not self._effect_evidence:
