@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import json
 from dataclasses import asdict, dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Protocol
 
 
 STATES = {
@@ -201,7 +201,9 @@ class PermitVerifier:
         if now >= permit.expires_at:
             return "permit_expired"
         expected = expected_resource_version or contract.expected_resource_version
-        if permit.resource_version != expected or current_resource_version != expected:
+        if permit.resource_version != expected:
+            return "permit_resource_version_mismatch"
+        if current_resource_version != expected:
             return "resource_version_conflict"
         requested = set(actions if actions is not None else contract.requested_actions)
         if not requested.issubset(set(permit.allowed_actions)):
@@ -297,6 +299,13 @@ class IdempotencyRegistry:
         return ticket
 
 
+class ResourceVersionOracle(Protocol):
+    """Trusted adapter that reads the authoritative target-side resource version."""
+
+    def current_version(self, resource_id: str) -> str:
+        ...
+
+
 class AssuranceSession:
     """Only guarded methods can advance state; no external transition flag is accepted."""
 
@@ -305,6 +314,7 @@ class AssuranceSession:
         contract: TaskContract,
         permit_verifier: PermitVerifier,
         evidence_verifier: EvidenceVerifier,
+        resource_version_oracle: ResourceVersionOracle,
         connector_source_id: str = "agent-connector",
         connector_key_id: str = "agent-connector-key",
         idempotency_registry: IdempotencyRegistry | None = None,
@@ -312,6 +322,7 @@ class AssuranceSession:
         self.contract = contract
         self._permit_verifier = permit_verifier
         self._evidence_verifier = evidence_verifier
+        self._resource_version_oracle = resource_version_oracle
         self._connector_source_id = connector_source_id
         self._connector_key_id = connector_key_id
         self._idempotency = idempotency_registry or IdempotencyRegistry()
@@ -386,9 +397,23 @@ class AssuranceSession:
         if self._connector_key_id in key_ids or self._connector_source_id in sources:
             raise EvidenceError("evidence_channel_reuses_connector_identity")
 
-    def authorize(self, permit: Permit, now: int, current_resource_version: str) -> bool:
+    def _read_resource_version(self) -> str:
+        try:
+            version = self._resource_version_oracle.current_version(self.contract.resource_id)
+        except Exception as exc:
+            raise EvidenceError("resource_version_unavailable") from exc
+        if not isinstance(version, str) or not version.strip():
+            raise EvidenceError("resource_version_unavailable")
+        return version
+
+    def authorize(self, permit: Permit, now: int) -> bool:
         if self._state != "SPECIFIED":
             raise InvalidTransition("authorize requires SPECIFIED")
+        try:
+            current_resource_version = self._read_resource_version()
+        except EvidenceError as exc:
+            self._record("AUTHORIZATION_DENIED", "RECOVERY_REQUIRED", now, False, str(exc))
+            return False
         reason = self._permit_verifier.evaluate(self.contract, permit, now, current_resource_version)
         if reason:
             self._record("AUTHORIZATION_DENIED", self._permit_failure_state(reason), now, False, reason)
@@ -414,13 +439,18 @@ class AssuranceSession:
         self._record("PLAN_VERIFIED", "VERIFIED_PLAN", now, True, evidence_refs=[receipt.receipt_digest])
         return True
 
-    def begin_execution(self, permit: Permit, now: int, current_resource_version: str) -> ExecutionTicket | None:
+    def begin_execution(self, permit: Permit, now: int) -> ExecutionTicket | None:
         if self._state == "EXECUTING" and self._ticket is not None:
             # A retry returns the same ticket/key. The downstream actuator must also
             # enforce that key atomically to prevent duplicate side effects.
             return self._ticket
         if self._state != "VERIFIED_PLAN":
             raise InvalidTransition("begin_execution requires VERIFIED_PLAN")
+        try:
+            current_resource_version = self._read_resource_version()
+        except EvidenceError as exc:
+            self._record("EXECUTION_DENIED", "RECOVERY_REQUIRED", now, False, str(exc))
+            return None
         reason = self._permit_verifier.evaluate(self.contract, permit, now, current_resource_version)
         if reason:
             self._record("EXECUTION_DENIED", self._permit_failure_state(reason), now, False, reason)
@@ -456,6 +486,8 @@ class AssuranceSession:
                 raise EvidenceError("partial_effect_not_proven_by_complete_target_audit")
             if p.get("resource_version_before") != self.contract.expected_resource_version:
                 raise EvidenceError("partial_effect_precondition_version_mismatch")
+            if p.get("resource_version_after") != self._read_resource_version():
+                raise EvidenceError("partial_effect_current_version_mismatch")
             if not set(p.get("diff_paths", [])).issubset(set(self.contract.allowed_diff_paths)):
                 raise EvidenceError("partial_effect_outside_allowlist")
             if not p.get("state_hash") or not isinstance(p.get("sequence"), int) or not p.get("resource_version_after"):
@@ -518,11 +550,15 @@ class AssuranceSession:
         audit: EvidenceReceipt,
         readback: EvidenceReceipt,
         tripwire: EvidenceReceipt,
-        current_resource_version: str,
         now: int,
     ) -> bool:
         if self._state != "EXECUTING":
             raise InvalidTransition("verify_effect requires EXECUTING")
+        try:
+            current_resource_version = self._read_resource_version()
+        except EvidenceError as exc:
+            self._record("EFFECT_VERIFICATION_FAILED", "RECOVERY_REQUIRED", now, False, str(exc))
+            return False
         ok, reason = self._verify_bundle(
             audit, readback, tripwire, current_resource_version,
             accepted_effect_states={"COMPLETE"},
@@ -536,9 +572,14 @@ class AssuranceSession:
         self._record("EFFECT_VERIFIED", "EFFECT_VERIFIED", now, True, evidence_refs=refs)
         return True
 
-    def begin_compensation(self, permit: Permit, now: int, current_resource_version: str) -> bool:
+    def begin_compensation(self, permit: Permit, now: int) -> bool:
         if self._state not in {"PARTIAL_EFFECT", "RECOVERY_REQUIRED"}:
             raise InvalidTransition("begin_compensation requires PARTIAL_EFFECT or RECOVERY_REQUIRED")
+        try:
+            current_resource_version = self._read_resource_version()
+        except EvidenceError as exc:
+            self._record("COMPENSATION_DENIED", "RECOVERY_REQUIRED", now, False, str(exc))
+            return False
         reason = self._permit_verifier.evaluate(
             self.contract, permit, now, current_resource_version,
             actions=("compensate",), expected_resource_version=current_resource_version,
@@ -566,11 +607,15 @@ class AssuranceSession:
         audit: EvidenceReceipt,
         readback: EvidenceReceipt,
         tripwire: EvidenceReceipt,
-        current_resource_version: str,
         now: int,
     ) -> bool:
         if self._state not in {"COMPENSATING", "ABORTED", "REJECTED", "EXPIRED", "CONFLICT", "RECOVERY_REQUIRED"}:
             raise InvalidTransition("CLOSED_FAILED requires a failed/compensating/recovery state")
+        try:
+            current_resource_version = self._read_resource_version()
+        except EvidenceError as exc:
+            self._record("FAILED_CLOSURE_UNPROVEN", "RECOVERY_REQUIRED", now, False, str(exc))
+            return False
         before = None
         if self._state == "COMPENSATING" and self._partial_audit is not None:
             before = self._partial_audit.payload.get("resource_version_after")
