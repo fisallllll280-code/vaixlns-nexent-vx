@@ -33,8 +33,8 @@ MUTANTS = [
     ),
     (
         "resource-version-toctou",
-        "if permit.resource_version != expected or current_resource_version != expected:",
-        "if permit.resource_version != expected or False:",
+        "if current_resource_version != expected:",
+        "if False and current_resource_version != expected:",
         "test_agent_assurance.AgentAssuranceTests.test_time_of_check_time_of_use_resource_change_rejected",
     ),
 ]
