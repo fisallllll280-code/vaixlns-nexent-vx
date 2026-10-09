@@ -1,0 +1,43 @@
+name: VX Agent Action Assurance
+
+on:
+  push:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assurance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate schema JSON
+        run: python -m json.tool schemas/agent-action-control-assurance-v1.schema.json > /dev/null
+
+      - name: Compile implementation, tests and mutation runner
+        run: |
+          python -m py_compile \
+            src/vaixlns/vx/agent_assurance.py \
+            tests/test_agent_assurance.py \
+            scripts/run_agent_assurance_mutations.py
+
+      - name: Run assurance and randomized invariant tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -p "test_agent_assurance.py" -v
+
+      - name: Run targeted mutation canaries
+        env:
+          PYTHONPATH: src
+        run: python scripts/run_agent_assurance_mutations.py

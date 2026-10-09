@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vaixlns.org/schemas/agent-action-control-assurance-v1.schema.json",
+  "title": "VAIXLNS / VX Agent Action-Control Assurance Contract",
+  "description": "Reference contract for gated agent actions, evidence independence, partial-effect recovery and verified closure.",
+  "oneOf": [
+    { "$ref": "#/$defs/TaskContract" },
+    { "$ref": "#/$defs/Permit" },
+    { "$ref": "#/$defs/EvidenceReceipt" },
+    { "$ref": "#/$defs/ExecutionTicket" },
+    { "$ref": "#/$defs/TransitionReceipt" }
+  ],
+  "$defs": {
+    "TaskContract": {
+      "type": "object",
+      "required": [
+        "contract_id",
+        "operation_id",
+        "principal_id",
+        "resource_id",
+        "expected_resource_version",
+        "requested_actions",
+        "allowed_diff_paths"
+      ],
+      "properties": {
+        "contract_id": { "type": "string", "minLength": 1 },
+        "operation_id": { "type": "string", "minLength": 1 },
+        "principal_id": { "type": "string", "minLength": 1 },
+        "resource_id": { "type": "string", "minLength": 1 },
+        "expected_resource_version": { "type": "string", "minLength": 1 },
+        "requested_actions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "allowed_diff_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": { "pattern": "(^/|(^|/)\\.\\.(/|$))" }
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "Permit": {
+      "type": "object",
+      "required": [
+        "permit_id", "contract_id", "operation_id", "principal_id",
+        "resource_id", "resource_version", "allowed_actions",
+        "issued_at", "expires_at", "key_id", "signature"
+      ],
+      "properties": {
+        "permit_id": { "type": "string", "minLength": 1 },
+        "contract_id": { "type": "string", "minLength": 1 },
+        "operation_id": { "type": "string", "minLength": 1 },
+        "principal_id": { "type": "string", "minLength": 1 },
+        "resource_id": { "type": "string", "minLength": 1 },
+        "resource_version": { "type": "string", "minLength": 1 },
+        "allowed_actions": { "type": "array", "items": { "type": "string" }, "minItems": 1, "uniqueItems": true },
+        "issued_at": { "type": "integer", "minimum": 0 },
+        "expires_at": { "type": "integer", "minimum": 1 },
+        "key_id": { "type": "string", "minLength": 1 },
+        "signature": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "EvidenceReceipt": {
+      "type": "object",
+      "required": ["kind", "source_id", "key_id", "timestamp", "payload", "signature"],
+      "properties": {
+        "kind": { "enum": ["PLAN_VERIFICATION", "TARGET_AUDIT", "READBACK", "TRIPWIRE"] },
+        "source_id": { "type": "string", "minLength": 1 },
+        "key_id": { "type": "string", "minLength": 1 },
+        "timestamp": { "type": "integer", "minimum": 0 },
+        "payload": { "type": "object" },
+        "signature": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "ExecutionTicket": {
+      "type": "object",
+      "required": [
+        "contract_id", "operation_id", "resource_id", "resource_version",
+        "idempotency_key", "contract_digest", "permit_id"
+      ],
+      "properties": {
+        "contract_id": { "type": "string" },
+        "operation_id": { "type": "string" },
+        "resource_id": { "type": "string" },
+        "resource_version": { "type": "string" },
+        "idempotency_key": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "contract_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "permit_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "TransitionReceipt": {
+      "type": "object",
+      "required": [
+        "sequence", "event", "from_state", "to_state", "timestamp",
+        "accepted", "reason", "evidence_refs", "previous_digest", "digest"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "event": { "type": "string", "minLength": 1 },
+        "from_state": { "$ref": "#/$defs/State" },
+        "to_state": { "$ref": "#/$defs/State" },
+        "timestamp": { "type": "integer", "minimum": 0 },
+        "accepted": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "evidence_refs": { "type": "array", "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" } },
+        "previous_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "State": {
+      "enum": [
+        "SPECIFIED", "AUTHORIZED", "VERIFIED_PLAN", "EXECUTING",
+        "PARTIAL_EFFECT", "COMPENSATING", "EFFECT_VERIFIED",
+        "CLOSED_VERIFIED", "CLOSED_FAILED", "CONFLICT", "REJECTED",
+        "EXPIRED", "ABORTED", "RECOVERY_REQUIRED"
+      ]
+    }
+  }
+}
