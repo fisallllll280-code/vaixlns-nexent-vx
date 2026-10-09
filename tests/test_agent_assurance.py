@@ -233,7 +233,7 @@ class AgentAssuranceTests(AssuranceFixture):
 
     def test_idempotency_key_is_stable_and_contract_bound(self):
         permit, ticket = self.reach_executing()
-        again = self.session.begin_execution(permit, NOW + 3, "v7")
+        again = self.session.begin_execution(permit, NOW + 3)
         self.assertEqual(ticket, again)
         self.assertEqual(ticket.idempotency_key, self.contract.idempotency_key)
         changed = TaskContract(
