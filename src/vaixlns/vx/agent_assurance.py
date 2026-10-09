@@ -80,6 +80,8 @@ class TaskContract:
             raise ValueError("requested_actions must contain non-empty action names")
         if len(set(self.requested_actions)) != len(self.requested_actions):
             raise ValueError("requested_actions must be unique")
+        if len(set(self.allowed_diff_paths)) != len(self.allowed_diff_paths):
+            raise ValueError("allowed_diff_paths must be unique")
         for path in self.allowed_diff_paths:
             if not path or path.startswith("/") or ".." in path.split("/"):
                 raise ValueError(f"unsafe allowlist path: {path}")
@@ -340,7 +342,8 @@ class AssuranceSession:
 
     @property
     def history(self) -> tuple[dict[str, Any], ...]:
-        return tuple(self._history)
+        # Never leak mutable internal receipt dictionaries to callers.
+        return tuple(json.loads(canonical_json(item)) for item in self._history)
 
     @property
     def ticket(self) -> ExecutionTicket | None:
@@ -386,7 +389,7 @@ class AssuranceSession:
         p = receipt.payload
         if p.get("contract_id") != self.contract.contract_id or p.get("operation_id") != self.contract.operation_id:
             raise EvidenceError("evidence_contract_binding_mismatch")
-        if p.get("resource_id") not in (None, self.contract.resource_id):
+        if p.get("resource_id") != self.contract.resource_id:
             raise EvidenceError("evidence_resource_binding_mismatch")
 
     def _check_independence(self, receipts: tuple[EvidenceReceipt, ...]) -> None:
@@ -616,7 +619,7 @@ class AssuranceSession:
         except EvidenceError as exc:
             self._record("FAILED_CLOSURE_UNPROVEN", "RECOVERY_REQUIRED", now, False, str(exc))
             return False
-        before = None
+        before = self.contract.expected_resource_version
         if self._state == "COMPENSATING" and self._partial_audit is not None:
             before = self._partial_audit.payload.get("resource_version_after")
         ok, reason = self._verify_bundle(
