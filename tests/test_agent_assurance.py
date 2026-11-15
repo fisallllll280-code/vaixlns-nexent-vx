@@ -1,11 +1,14 @@
 """Security invariants for the VX agent-action assurance gate (stdlib only)."""
 import random
+import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from vaixlns.vx.agent_assurance import (
-    STATES, AssuranceSession, EvidenceReceipt, EvidenceSigner, EvidenceVerifier,
-    IdempotencyRegistry, InvalidTransition, PermitAuthority, PermitVerifier,
-    TaskContract, digest,
+    STATES, AssuranceSession, EvidenceError, EvidenceReceipt, EvidenceSigner, EvidenceVerifier,
+    ExecutionTicket, IdempotencyRegistry, InvalidTransition, PermitAuthority, PermitVerifier,
+    SQLiteIdempotencyRegistry, TaskContract, digest,
 )
 
 NOW = 1_000
@@ -140,6 +143,16 @@ class AssuranceFixture(unittest.TestCase):
         )
 
 
+    def test_assurance_session_requires_explicit_idempotency_store(self):
+        with self.assertRaisesRegex(ValueError, "idempotency_registry_required"):
+            AssuranceSession(
+                self.contract,
+                self.permit_verifier,
+                self.evidence_verifier,
+                self.version_oracle,
+            )
+
+
 class AgentAssuranceTests(AssuranceFixture):
     def test_complete_happy_path_is_evidence_gated(self):
         self.reach_executing()
@@ -255,13 +268,94 @@ class AgentAssuranceTests(AssuranceFixture):
         ))
         self.assertEqual(other_session.state, "CONFLICT")
 
+
+    def _execution_ticket(self, contract, permit_id="PERMIT-DB"):
+        return ExecutionTicket(
+            contract_id=contract.contract_id,
+            operation_id=contract.operation_id,
+            resource_id=contract.resource_id,
+            resource_version=contract.expected_resource_version,
+            idempotency_key=contract.idempotency_key,
+            contract_digest=contract.contract_digest,
+            permit_id=permit_id,
+        )
+
+    def test_sqlite_registry_persists_reservation_across_instances(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "idempotency.sqlite3")
+            first_registry = SQLiteIdempotencyRegistry(database)
+            first_ticket = self._execution_ticket(self.contract, "PERMIT-FIRST")
+            self.assertEqual(first_ticket, first_registry.reserve(self.contract, first_ticket))
+
+            restarted_registry = SQLiteIdempotencyRegistry(database)
+            retry_ticket = self._execution_ticket(self.contract, "PERMIT-RETRY")
+            self.assertEqual(first_ticket, restarted_registry.reserve(self.contract, retry_ticket))
+
+    def test_sqlite_registry_rejects_changed_contract_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "idempotency.sqlite3")
+            SQLiteIdempotencyRegistry(database).reserve(
+                self.contract, self._execution_ticket(self.contract)
+            )
+            changed = TaskContract(
+                contract_id=self.contract.contract_id,
+                operation_id=self.contract.operation_id,
+                principal_id=self.contract.principal_id,
+                resource_id=self.contract.resource_id,
+                expected_resource_version=self.contract.expected_resource_version,
+                requested_actions=("write",),
+                allowed_diff_paths=self.contract.allowed_diff_paths,
+            )
+            registry_after_restart = SQLiteIdempotencyRegistry(database)
+            with self.assertRaises(EvidenceError):
+                registry_after_restart.reserve(changed, self._execution_ticket(changed, "CHANGED"))
+
+    def test_sqlite_registry_serializes_concurrent_reservations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "idempotency.sqlite3")
+            registry = SQLiteIdempotencyRegistry(database, timeout_seconds=10)
+            tickets = [
+                self._execution_ticket(self.contract, f"PERMIT-{index}")
+                for index in range(24)
+            ]
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(
+                    lambda ticket: registry.reserve(self.contract, ticket),
+                    tickets,
+                ))
+            self.assertTrue(results)
+            self.assertTrue(all(item == results[0] for item in results))
+
+    def test_sqlite_registry_rejects_ticket_with_mismatched_contract_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "idempotency.sqlite3")
+            registry = SQLiteIdempotencyRegistry(database)
+            mismatched = ExecutionTicket(
+                contract_id=self.contract.contract_id,
+                operation_id=self.contract.operation_id,
+                resource_id=self.contract.resource_id,
+                resource_version=self.contract.expected_resource_version,
+                idempotency_key=self.contract.idempotency_key,
+                contract_digest="0" * 64,
+                permit_id="MISMATCH",
+            )
+            with self.assertRaises(EvidenceError):
+                registry.reserve(self.contract, mismatched)
+
+    def test_sqlite_registry_rejects_non_persistent_memory_database(self):
+        with self.assertRaises(ValueError):
+            SQLiteIdempotencyRegistry(":memory:")
+
     def test_no_public_unconditional_transition_api(self):
         self.assertFalse(hasattr(self.session, "transition"))
         self.assertFalse(hasattr(self.session, "force_transition"))
 
     def test_revoked_permit_rejected(self):
         verifier = PermitVerifier({"permit-key": PERMIT_KEY}, revoked_permit_ids={"REVOKED"})
-        session = AssuranceSession(self.contract, verifier, self.evidence_verifier, self.version_oracle)
+        session = AssuranceSession(
+            self.contract, verifier, self.evidence_verifier, self.version_oracle,
+            idempotency_registry=self.registry,
+        )
         revoked = self.permit(permit_id="REVOKED")
         self.assertFalse(session.authorize(revoked, NOW))
         self.assertEqual(session.state, "REJECTED")
