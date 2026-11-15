@@ -346,7 +346,10 @@ class SQLiteIdempotencyRegistry:
         return connection
 
     def _initialize(self) -> None:
-        connection = self._connect()
+        try:
+            connection = self._connect()
+        except sqlite3.Error as exc:
+            raise EvidenceError("idempotency_store_initialization_failed") from exc
         try:
             mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()
             if not mode or str(mode[0]).lower() != "wal":
@@ -377,7 +380,10 @@ class SQLiteIdempotencyRegistry:
             sort_keys=True,
             separators=(",", ":"),
         )
-        connection = self._connect()
+        try:
+            connection = self._connect()
+        except sqlite3.Error as exc:
+            raise EvidenceError("idempotency_store_unavailable") from exc
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -419,10 +425,16 @@ class SQLiteIdempotencyRegistry:
             connection.commit()
             return ticket
         except EvidenceError:
-            connection.rollback()
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
             raise
         except sqlite3.Error as exc:
-            connection.rollback()
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
             raise EvidenceError("idempotency_store_unavailable") from exc
         finally:
             connection.close()
