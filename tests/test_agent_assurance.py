@@ -143,6 +143,16 @@ class AssuranceFixture(unittest.TestCase):
         )
 
 
+    def test_assurance_session_requires_explicit_idempotency_store(self):
+        with self.assertRaisesRegex(ValueError, "idempotency_registry_required"):
+            AssuranceSession(
+                self.contract,
+                self.permit_verifier,
+                self.evidence_verifier,
+                self.version_oracle,
+            )
+
+
 class AgentAssuranceTests(AssuranceFixture):
     def test_complete_happy_path_is_evidence_gated(self):
         self.reach_executing()
@@ -342,7 +352,10 @@ class AgentAssuranceTests(AssuranceFixture):
 
     def test_revoked_permit_rejected(self):
         verifier = PermitVerifier({"permit-key": PERMIT_KEY}, revoked_permit_ids={"REVOKED"})
-        session = AssuranceSession(self.contract, verifier, self.evidence_verifier, self.version_oracle)
+        session = AssuranceSession(
+            self.contract, verifier, self.evidence_verifier, self.version_oracle,
+            idempotency_registry=self.registry,
+        )
         revoked = self.permit(permit_id="REVOKED")
         self.assertFalse(session.authorize(revoked, NOW))
         self.assertEqual(session.state, "REJECTED")
