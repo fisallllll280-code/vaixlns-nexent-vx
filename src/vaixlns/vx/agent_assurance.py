@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
+import sqlite3
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Protocol
 
@@ -285,7 +287,7 @@ class ExecutionTicket:
 
 
 class IdempotencyRegistry:
-    """Small in-memory reference registry; production requires durable atomic storage."""
+    """In-memory registry for unit tests; use SQLiteIdempotencyRegistry for local persistence."""
 
     def __init__(self) -> None:
         self._records: dict[str, tuple[str, ExecutionTicket]] = {}
@@ -299,6 +301,131 @@ class IdempotencyRegistry:
             return existing_ticket
         self._records[contract.idempotency_key] = (contract.contract_digest, ticket)
         return ticket
+
+
+class IdempotencyStore(Protocol):
+    """Atomic reservation store required by the assurance session."""
+
+    def reserve(self, contract: TaskContract, ticket: ExecutionTicket) -> ExecutionTicket:
+        ...
+
+
+class SQLiteIdempotencyRegistry:
+    """Single-host durable reservation store using SQLite transactions.
+
+    This protects against process restart and concurrent local reservations. The
+    database file, parent directory, backups and host remain part of the trust
+    boundary; SQLite does not provide tamper-proof or distributed anti-rollback.
+    """
+
+    def __init__(self, database_path: str, timeout_seconds: float = 5.0) -> None:
+        if not isinstance(database_path, str) or not database_path.strip():
+            raise ValueError("database_path_must_be_non_empty")
+        if database_path in {":memory:", "file::memory:"}:
+            raise ValueError("persistent_registry_requires_a_file_database")
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+            or timeout_seconds > 60
+        ):
+            raise ValueError("timeout_seconds_must_be_between_0_and_60")
+        self._database_path = database_path
+        self._timeout = float(timeout_seconds)
+        self._initialize()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self._database_path,
+            timeout=self._timeout,
+            isolation_level=None,
+        )
+        connection.execute(f"PRAGMA busy_timeout = {int(self._timeout * 1000)}")
+        connection.execute("PRAGMA synchronous = FULL")
+        return connection
+
+    def _initialize(self) -> None:
+        connection = self._connect()
+        try:
+            mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+            if not mode or str(mode[0]).lower() != "wal":
+                raise EvidenceError("idempotency_store_wal_unavailable")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS idempotency_reservations (
+                    idempotency_key TEXT PRIMARY KEY NOT NULL,
+                    contract_digest TEXT NOT NULL,
+                    ticket_json TEXT NOT NULL
+                ) WITHOUT ROWID
+                """
+            )
+        except sqlite3.Error as exc:
+            raise EvidenceError("idempotency_store_initialization_failed") from exc
+        finally:
+            connection.close()
+
+    def reserve(self, contract: TaskContract, ticket: ExecutionTicket) -> ExecutionTicket:
+        expected_key = contract.idempotency_key
+        expected_digest = contract.contract_digest
+        if ticket.idempotency_key != expected_key or ticket.contract_digest != expected_digest:
+            raise EvidenceError("ticket_contract_binding_mismatch")
+
+        encoded_ticket = json.dumps(
+            asdict(ticket),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT contract_digest, ticket_json
+                FROM idempotency_reservations
+                WHERE idempotency_key = ?
+                """,
+                (expected_key,),
+            ).fetchone()
+
+            if row is not None:
+                stored_digest, stored_json = row
+                if stored_digest != expected_digest:
+                    raise EvidenceError("idempotency_key_reused_with_changed_contract")
+                try:
+                    stored_ticket = ExecutionTicket(**json.loads(stored_json))
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise EvidenceError("idempotency_store_corrupt") from exc
+                if (
+                    stored_ticket.idempotency_key != expected_key
+                    or stored_ticket.contract_digest != expected_digest
+                    or stored_ticket.contract_id != contract.contract_id
+                    or stored_ticket.operation_id != contract.operation_id
+                    or stored_ticket.resource_id != contract.resource_id
+                ):
+                    raise EvidenceError("idempotency_store_binding_corrupt")
+                connection.commit()
+                return stored_ticket
+
+            connection.execute(
+                """
+                INSERT INTO idempotency_reservations
+                    (idempotency_key, contract_digest, ticket_json)
+                VALUES (?, ?, ?)
+                """,
+                (expected_key, expected_digest, encoded_ticket),
+            )
+            connection.commit()
+            return ticket
+        except EvidenceError:
+            connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            connection.rollback()
+            raise EvidenceError("idempotency_store_unavailable") from exc
+        finally:
+            connection.close()
 
 
 class ResourceVersionOracle(Protocol):
@@ -319,7 +446,7 @@ class AssuranceSession:
         resource_version_oracle: ResourceVersionOracle,
         connector_source_id: str = "agent-connector",
         connector_key_id: str = "agent-connector-key",
-        idempotency_registry: IdempotencyRegistry | None = None,
+        idempotency_registry: IdempotencyStore | None = None,
     ) -> None:
         self.contract = contract
         self._permit_verifier = permit_verifier
