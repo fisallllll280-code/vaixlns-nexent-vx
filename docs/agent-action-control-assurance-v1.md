@@ -59,11 +59,12 @@ The randomized test explores 5,000 deterministic random transition sequences. Th
 
 This code is a **reference state machine**, not yet a production security boundary:
 
-- IdempotencyRegistry is in-memory; replace it with an atomic durable store.
+- IdempotencyRegistry remains an in-memory test double. SQLiteIdempotencyRegistry adds single-host file-backed reservations with WAL, FULL synchronous mode, BEGIN IMMEDIATE transactions, restart reuse and concurrent reservation tests.
+- SQLite persistence does not make the database tamper-proof, protect against host/disk loss or backup rollback, coordinate distributed hosts on arbitrary network filesystems, or persist the complete AssuranceSession lifecycle/history. A protected monotonic store and actuator-enforced idempotency are still required for production.
 - Python object state is not a process isolation boundary.
 - HMAC verifier and signer objects are fixtures/adapters; production keys must be held by separate authorization/evidence services or a managed key system and never exposed to the agent.
 - No real repository, GitHub, cloud, filesystem or other target actuator is connected here.
-- No target-side audit/tripwire adapter, TLA+ model, concurrency test, or external readback integration is included.
+- No target-side audit/tripwire adapter, TLA+ model, distributed concurrency test, or external readback integration is included.
 - A green test suite validates the tested contract, not all possible production behavior.
 
 Keep this feature behind pull-request review until the CI evidence is inspected. Do not promote this artifact to VERIFIED or production-ready before these blockers are closed.
