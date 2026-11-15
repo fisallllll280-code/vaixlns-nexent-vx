@@ -466,7 +466,9 @@ class AssuranceSession:
         self._resource_version_oracle = resource_version_oracle
         self._connector_source_id = connector_source_id
         self._connector_key_id = connector_key_id
-        self._idempotency = idempotency_registry or IdempotencyRegistry()
+        if idempotency_registry is None:
+            raise ValueError("idempotency_registry_required")
+        self._idempotency = idempotency_registry
         self._state = "SPECIFIED"
         self._history: list[dict[str, Any]] = []
         self._permit: Permit | None = None
